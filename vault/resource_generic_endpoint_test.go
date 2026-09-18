@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/vault/api"
 
@@ -242,4 +243,68 @@ func testResourceGenericEndpoint_destroyCheck(resourceNames []string, path strin
 
 		return nil
 	}
+}
+
+// TestAccGenericEndpoint_data_json_wo ensures the write-only attribute
+// data_json_wo works as expected for vault_generic_endpoint.
+func TestAccGenericEndpoint_data_json_wo(t *testing.T) {
+	t.Parallel()
+
+	resourceName := "vault_generic_endpoint.test"
+	mount := acctest.RandomWithPrefix("secretsv1")
+	name := acctest.RandomWithPrefix("test")
+	path := fmt.Sprintf("%s/%s", mount, name)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV5ProviderFactories: testAccProtoV5ProviderFactories(context.Background(), t),
+		PreCheck:                 func() { testutil.TestAccPreCheck(t) },
+		Steps: []resource.TestStep{
+			{
+				Config: testResourceGenericEndpoint_data_json_wo(mount, name, "zap", 1),
+				Check: resource.ComposeTestCheckFunc(
+					assertGenericSecretDataEquals(path, map[string]interface{}{
+						"zip": "zap",
+					}),
+					resource.TestCheckResourceAttr(resourceName, consts.FieldDataJSONWOVersion, "1"),
+					resource.TestCheckNoResourceAttr(resourceName, consts.FieldDataJSON),
+				),
+			},
+			{
+				// Update the write-only data by bumping the version counter.
+				Config: testResourceGenericEndpoint_data_json_wo(mount, name, "zoop", 2),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+				Check: resource.ComposeTestCheckFunc(
+					assertGenericSecretDataEquals(path, map[string]interface{}{
+						"zip": "zoop",
+					}),
+					resource.TestCheckResourceAttr(resourceName, consts.FieldDataJSONWOVersion, "2"),
+				),
+			},
+		},
+	})
+}
+
+func testResourceGenericEndpoint_data_json_wo(mount, name, value string, version int) string {
+	return fmt.Sprintf(`
+resource "vault_mount" "v1" {
+	path = "%s"
+	type = "kv"
+	options = {
+		version = "1"
+	}
+}
+
+resource "vault_generic_endpoint" "test" {
+    path = "${vault_mount.v1.path}/%s"
+    data_json_wo = jsonencode(
+        {
+            zip = "%s"
+        }
+    )
+    data_json_wo_version = %d
+}`, mount, name, value, version)
 }

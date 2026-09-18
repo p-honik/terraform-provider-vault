@@ -41,6 +41,31 @@ EOT
 }
 ```
 
+### Write-only data
+
+`data_json` can instead be supplied via the write-only `data_json_wo` argument, in which case its value is never
+persisted to state or plan files. See the
+[write-only attributes guide](../guides/using_write_only_attributes.html) for more details, including how to update
+a write-only value.
+
+```hcl
+resource "vault_generic_secret" "example" {
+  path = "secret/foo"
+
+  data_json_wo = <<EOT
+{
+  "foo":   "bar",
+  "pizza": "cheese"
+}
+EOT
+  data_json_wo_version = 1
+}
+```
+
+~> **Note** Because Vault returns the same data that was written when this resource is read back (used for drift
+detection), the `data`/`data_json` attributes are not refreshed from Vault while `data_json_wo` is in use, in order
+to avoid re-introducing the secret value into state on every plan.
+
 ## Argument Reference
 
 The following arguments are supported:
@@ -56,8 +81,15 @@ The following arguments are supported:
   resource is possible; consult each backend's documentation to see which
   endpoints support the `PUT` and `DELETE` methods.
 
-* `data_json` - (Required) String containing a JSON-encoded object that will be
-  written as the secret data at the given path.
+* `data_json` - (Optional) String containing a JSON-encoded object that will be
+  written as the secret data at the given path. This is required if `data_json_wo` is not set.
+
+* `data_json_wo` - (Optional) String containing a JSON-encoded object that will be
+  written as the secret data at the given path. This is required if `data_json` is not set.
+  **Note**: This property is write-only and will not be read from the API.
+
+* `data_json_wo_version` - (Optional) The version of `data_json_wo`. For more info see
+  [updating write-only attributes](../guides/using_write_only_attributes.html#updating-write-only-attributes).
 
 * `disable_read` - (Optional) true/false. Set this to true if your vault
   authentication is not able to read the data. Setting this to `true` will
@@ -90,7 +122,7 @@ The following attributes are exported in addition to the above:
 * `data` - A mapping whose keys are the top-level data keys returned from
 Vault and whose values are the corresponding values. This map can only
 represent string data, so any non-string values returned from Vault are
-serialized as JSON.
+serialized as JSON. Not populated when `data_json_wo` is used.
 
 ## Import
 

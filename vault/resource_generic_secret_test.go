@@ -7,10 +7,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/vault/api"
 
@@ -436,4 +438,92 @@ func testResourceGenericSecret_updateCheck(s *terraform.State) error {
 	}
 
 	return nil
+}
+
+// TestAccGenericSecret_data_json_wo ensures the write-only attribute
+// data_json_wo works as expected for vault_generic_secret.
+func TestAccGenericSecret_data_json_wo(t *testing.T) {
+	t.Parallel()
+
+	resourceName := "vault_generic_secret.test"
+	mount := acctest.RandomWithPrefix("secretsv1")
+	name := acctest.RandomWithPrefix("test")
+	path := fmt.Sprintf("%s/%s", mount, name)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV5ProviderFactories: testAccProtoV5ProviderFactories(context.Background(), t),
+		PreCheck:                 func() { testutil.TestAccPreCheck(t) },
+		Steps: []resource.TestStep{
+			{
+				Config: testResourceGenericSecret_data_json_wo(mount, name, "zap", 1),
+				Check: resource.ComposeTestCheckFunc(
+					assertGenericSecretDataEquals(path, map[string]interface{}{
+						"zip": "zap",
+					}),
+					resource.TestCheckResourceAttr(resourceName, consts.FieldDataJSONWOVersion, "1"),
+					resource.TestCheckNoResourceAttr(resourceName, consts.FieldDataJSON),
+					resource.TestCheckNoResourceAttr(resourceName, "data.%"),
+				),
+			},
+			{
+				// Update the write-only data by bumping the version counter.
+				Config: testResourceGenericSecret_data_json_wo(mount, name, "zoop", 2),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					},
+				},
+				Check: resource.ComposeTestCheckFunc(
+					assertGenericSecretDataEquals(path, map[string]interface{}{
+						"zip": "zoop",
+					}),
+					resource.TestCheckResourceAttr(resourceName, consts.FieldDataJSONWOVersion, "2"),
+				),
+			},
+			// Full ImportStateVerify is skipped here: a fresh import has no
+			// persisted data_json_wo_version to signal write-only mode, so
+			// the initial post-import read populates data_json/data from
+			// the live secret until the next apply reconciles the version.
+			testutil.GetImportTestStep(resourceName, true, nil),
+		},
+	})
+}
+
+func testResourceGenericSecret_data_json_wo(mount, name, value string, version int) string {
+	return fmt.Sprintf(`
+resource "vault_mount" "v1" {
+	path = "%s"
+	type = "kv"
+	options = {
+		version = "1"
+	}
+}
+
+resource "vault_generic_secret" "test" {
+    path = "${vault_mount.v1.path}/%s"
+    data_json_wo = jsonencode(
+        {
+            zip = "%s"
+        }
+    )
+    data_json_wo_version = %d
+}`, mount, name, value, version)
+}
+
+func assertGenericSecretDataEquals(path string, expected map[string]interface{}) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		client := testProvider.Meta().(*provider.ProviderMeta).MustGetClient()
+
+		resp, err := client.Logical().Read(path)
+		if err != nil {
+			return fmt.Errorf("error reading from Vault; err=%s", err)
+		}
+		if resp == nil {
+			return fmt.Errorf("empty response reading %q", path)
+		}
+		if !reflect.DeepEqual(resp.Data, expected) {
+			return fmt.Errorf("secret data does not match, got: %#v, want: %#v", resp.Data, expected)
+		}
+		return nil
+	}
 }

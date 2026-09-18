@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/hashicorp/go-cty/cty"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 
 	"github.com/hashicorp/terraform-provider-vault/internal/consts"
@@ -42,15 +43,29 @@ func genericSecretResource(name string) *schema.Resource {
 			// possible, rather than forcing e.g. all values to be strings.
 			consts.FieldDataJSON: {
 				Type:        schema.TypeString,
-				Required:    true,
-				Description: "JSON-encoded secret data to write.",
+				Optional:    true,
+				Description: "JSON-encoded secret data to write. This is required if data_json_wo is not set.",
 				// We rebuild the attached JSON string to a simple singleline
 				// string. This makes terraform not want to change when an extra
 				// space is included in the JSON string. It is also necesarry
 				// when disable_read is false for comparing values.
-				StateFunc:    NormalizeDataJSONFunc(name),
-				ValidateFunc: ValidateDataJSONFunc(name),
-				Sensitive:    true,
+				StateFunc:     NormalizeDataJSONFunc(name),
+				ValidateFunc:  ValidateDataJSONFunc(name),
+				Sensitive:     true,
+				ConflictsWith: []string{consts.FieldDataJSONWO},
+			},
+			consts.FieldDataJSONWO: {
+				Type:          schema.TypeString,
+				Optional:      true,
+				Description:   "Write-only JSON-encoded secret data to write. This is required if data_json is not set. This property is write-only and will not be read from the API.",
+				WriteOnly:     true,
+				ConflictsWith: []string{consts.FieldDataJSON},
+			},
+			consts.FieldDataJSONWOVersion: {
+				Type:         schema.TypeInt,
+				Optional:     true,
+				Description:  "The version of data_json_wo. For more info see updating write-only attributes.",
+				RequiredWith: []string{consts.FieldDataJSONWO},
 			},
 
 			"disable_read": {
@@ -128,9 +143,18 @@ func genericSecretResourceWrite(d *schema.ResourceData, meta interface{}) error 
 	if e != nil {
 		return e
 	}
+	var buf []byte
+	if v, ok := d.GetOk(consts.FieldDataJSON); ok {
+		buf = []byte(v.(string))
+	} else if d.IsNewResource() || d.HasChange(consts.FieldDataJSONWOVersion) {
+		p := cty.GetAttrPath(consts.FieldDataJSONWO)
+		woVal, _ := d.GetRawConfigAt(p)
+		buf = []byte(woVal.AsString())
+	}
+
 	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(d.Get(consts.FieldDataJSON).(string)), &data); err != nil {
-		return fmt.Errorf("data_json %#v syntax error: %s", d.Get(consts.FieldDataJSON), err)
+	if err := json.Unmarshal(buf, &data); err != nil {
+		return fmt.Errorf("data_json %#v syntax error: %s", string(buf), err)
 	}
 
 	path := d.Get(consts.FieldPath).(string)
@@ -193,6 +217,12 @@ func genericSecretResourceRead(d *schema.ResourceData, meta interface{}) error {
 	if e != nil {
 		return e
 	}
+	// data_json_wo_version is a regular (non-write-only) attribute, so it is
+	// the only reliable signal in Read for whether this secret's data was
+	// last supplied via the write-only data_json_wo field, since the
+	// write-only value itself is never persisted to state.
+	usingWriteOnly := d.Get(consts.FieldDataJSONWOVersion).(int) > 0
+
 	var data map[string]interface{}
 	shouldRead := !d.Get("disable_read").(bool)
 
@@ -211,17 +241,22 @@ func genericSecretResourceRead(d *schema.ResourceData, meta interface{}) error {
 		}
 
 		data = secret.Data
-		jsonData, err := json.Marshal(secret.Data)
-		if err != nil {
-			return fmt.Errorf("error marshaling JSON for %q: %s", path, err)
-		}
 
-		if err := d.Set(consts.FieldDataJSON, string(jsonData)); err != nil {
-			return err
+		if !usingWriteOnly {
+			jsonData, err := json.Marshal(secret.Data)
+			if err != nil {
+				return fmt.Errorf("error marshaling JSON for %q: %s", path, err)
+			}
+
+			if err := d.Set(consts.FieldDataJSON, string(jsonData)); err != nil {
+				return err
+			}
 		}
 		if err := d.Set(consts.FieldPath, path); err != nil {
 			return err
 		}
+	} else if usingWriteOnly {
+		log.Printf("[WARN] vault_generic_secret does not refresh when disable_read is set to true")
 	} else {
 		// Populate data from data_json from state
 		err := json.Unmarshal([]byte(d.Get(consts.FieldDataJSON).(string)), &data)
@@ -235,9 +270,11 @@ func genericSecretResourceRead(d *schema.ResourceData, meta interface{}) error {
 		return err
 	}
 
-	dataMap := serializeDataMapToString(data)
-	if err := d.Set("data", dataMap); err != nil {
-		return err
+	if !usingWriteOnly {
+		dataMap := serializeDataMapToString(data)
+		if err := d.Set("data", dataMap); err != nil {
+			return err
+		}
 	}
 
 	if err := d.Set("delete_all_versions", d.Get("delete_all_versions")); err != nil {

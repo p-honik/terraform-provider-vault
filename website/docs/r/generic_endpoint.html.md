@@ -39,12 +39,13 @@ resource "vault_generic_endpoint" "u1" {
   path                 = "auth/userpass/users/u1"
   ignore_absent_fields = true
 
-  data_json = <<EOT
+  data_json_wo = <<EOT
 {
   "policies": ["p1"],
   "password": "changeme"
 }
 EOT
+  data_json_wo_version = 1
 }
 
 resource "vault_generic_endpoint" "u1_token" {
@@ -95,8 +96,15 @@ The following arguments are supported:
   support the `PUT` methods and to determine whether they also support
   `DELETE` and `GET`.
 
-* `data_json` - (Required) String containing a JSON-encoded object that will be
-  written to the given path as the secret data.
+* `data_json` - (Optional) String containing a JSON-encoded object that will be
+  written to the given path as the secret data. This is required if `data_json_wo` is not set.
+
+* `data_json_wo` - (Optional) String containing a JSON-encoded object that will be
+  written to the given path as the secret data. This is required if `data_json` is not set.
+  **Note**: This property is write-only and will not be read from the API.
+
+* `data_json_wo_version` - (Optional) The version of `data_json_wo`. For more info see
+  [updating write-only attributes](../guides/using_write_only_attributes.html#updating-write-only-attributes).
 
 * `disable_read` - (Optional) True/false. Set this to true if your vault
   authentication is not able to read the data or if the endpoint does
@@ -136,6 +144,11 @@ In addition to the fields above, the following attributes are exported:
   corresponding values. This map can only represent string data, so
   any non-string values returned from Vault are serialized as JSON.
   Only fields set in `write_fields` are present in the JSON data.
+
+~> **Note** While `data_json_wo` is in use, `data_json` is not refreshed from Vault on read (this also means
+`ignore_absent_fields` has no effect), in order to avoid re-introducing the written value into state on every plan.
+See the [write-only attributes guide](../guides/using_write_only_attributes.html) for more details, including how to
+update a write-only value.
 
 ## Required Vault Capabilities
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/hashicorp/go-cty/cty"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 
 	"github.com/hashicorp/terraform-provider-vault/internal/consts"
@@ -38,17 +39,31 @@ func genericEndpointResource(name string) *schema.Resource {
 			// possible, rather than forcing e.g. all values to be strings.
 			consts.FieldDataJSON: {
 				Type:        schema.TypeString,
-				Required:    true,
-				Description: "JSON-encoded data to write.",
+				Optional:    true,
+				Description: "JSON-encoded data to write. This is required if data_json_wo is not set.",
 				// We rebuild the attached JSON string to a simple single-line
 				// string. This makes terraform not want to change when an
 				// extra space is included in the JSON string. It is also
 				// necessary when disable_read is false for comparing values.
 				// NormalizeDataJSON and ValidateDataJSON are in
 				// resource_generic_secret.
-				StateFunc:    NormalizeDataJSONFunc(name),
-				ValidateFunc: ValidateDataJSONFunc(name),
-				Sensitive:    true,
+				StateFunc:     NormalizeDataJSONFunc(name),
+				ValidateFunc:  ValidateDataJSONFunc(name),
+				Sensitive:     true,
+				ConflictsWith: []string{consts.FieldDataJSONWO},
+			},
+			consts.FieldDataJSONWO: {
+				Type:          schema.TypeString,
+				Optional:      true,
+				Description:   "Write-only JSON-encoded data to write. This is required if data_json is not set. This property is write-only and will not be read from the API.",
+				WriteOnly:     true,
+				ConflictsWith: []string{consts.FieldDataJSON},
+			},
+			consts.FieldDataJSONWOVersion: {
+				Type:         schema.TypeInt,
+				Optional:     true,
+				Description:  "The version of data_json_wo. For more info see updating write-only attributes.",
+				RequiredWith: []string{consts.FieldDataJSONWO},
 			},
 
 			"disable_read": {
@@ -98,10 +113,18 @@ func genericEndpointResourceWrite(d *schema.ResourceData, meta interface{}) erro
 		return e
 	}
 
+	var buf []byte
+	if v, ok := d.GetOk(consts.FieldDataJSON); ok {
+		buf = []byte(v.(string))
+	} else if d.IsNewResource() || d.HasChange(consts.FieldDataJSONWOVersion) {
+		p := cty.GetAttrPath(consts.FieldDataJSONWO)
+		woVal, _ := d.GetRawConfigAt(p)
+		buf = []byte(woVal.AsString())
+	}
+
 	var data map[string]interface{}
-	err := json.Unmarshal([]byte(d.Get(consts.FieldDataJSON).(string)), &data)
-	if err != nil {
-		return fmt.Errorf("data_json %#v syntax error: %s", d.Get(consts.FieldDataJSON), err)
+	if err := json.Unmarshal(buf, &data); err != nil {
+		return fmt.Errorf("data_json %#v syntax error: %s", string(buf), err)
 	}
 
 	path := d.Get("path").(string)
@@ -177,6 +200,12 @@ func genericEndpointResourceDelete(d *schema.ResourceData, meta interface{}) err
 }
 
 func genericEndpointResourceRead(d *schema.ResourceData, meta interface{}) error {
+	// data_json_wo_version is a regular (non-write-only) attribute, so it is
+	// the only reliable signal in Read for whether this endpoint's data was
+	// last supplied via the write-only data_json_wo field, since the
+	// write-only value itself is never persisted to state.
+	usingWriteOnly := d.Get(consts.FieldDataJSONWOVersion).(int) > 0
+
 	shouldRead := !d.Get("disable_read").(bool)
 
 	path := d.Id()
@@ -201,28 +230,32 @@ func genericEndpointResourceRead(d *schema.ResourceData, meta interface{}) error
 
 		log.Printf("[DEBUG] data from %q: %#v", path, data)
 
-		var relevantData map[string]interface{}
-		if ignore_absent_fields {
-			var suppliedData map[string]interface{}
-			err = json.Unmarshal([]byte(d.Get(consts.FieldDataJSON).(string)), &suppliedData)
-			if err != nil {
-				return fmt.Errorf("data_json %#v syntax error: %s", d.Get(consts.FieldDataJSON), err)
-			}
-			relevantData = suppliedData
-			for k, v := range data.Data {
-				if _, ok := suppliedData[k]; ok {
-					relevantData[k] = v
+		if !usingWriteOnly {
+			var relevantData map[string]interface{}
+			if ignore_absent_fields {
+				var suppliedData map[string]interface{}
+				err = json.Unmarshal([]byte(d.Get(consts.FieldDataJSON).(string)), &suppliedData)
+				if err != nil {
+					return fmt.Errorf("data_json %#v syntax error: %s", d.Get(consts.FieldDataJSON), err)
 				}
+				relevantData = suppliedData
+				for k, v := range data.Data {
+					if _, ok := suppliedData[k]; ok {
+						relevantData[k] = v
+					}
+				}
+			} else {
+				relevantData = data.Data
 			}
-		} else {
-			relevantData = data.Data
-		}
 
-		jsonData, err := json.Marshal(relevantData)
-		if err != nil {
-			return fmt.Errorf("error marshaling JSON for %q: %s", path, err)
+			jsonData, err := json.Marshal(relevantData)
+			if err != nil {
+				return fmt.Errorf("error marshaling JSON for %q: %s", path, err)
+			}
+			d.Set(consts.FieldDataJSON, string(jsonData))
+		} else {
+			log.Printf("[WARN] vault_generic_endpoint does not refresh data_json when using write-only data")
 		}
-		d.Set(consts.FieldDataJSON, string(jsonData))
 		d.Set("path", path)
 	} else {
 		log.Printf("[WARN] endpoint does not refresh when disable_read is set to true")
