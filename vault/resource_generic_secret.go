@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/go-cty/cty"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 
 	"github.com/hashicorp/terraform-provider-vault/internal/consts"
 	"github.com/hashicorp/terraform-provider-vault/internal/provider"
@@ -49,23 +50,29 @@ func genericSecretResource(name string) *schema.Resource {
 				// string. This makes terraform not want to change when an extra
 				// space is included in the JSON string. It is also necesarry
 				// when disable_read is false for comparing values.
-				StateFunc:     NormalizeDataJSONFunc(name),
-				ValidateFunc:  ValidateDataJSONFunc(name),
-				Sensitive:     true,
-				ConflictsWith: []string{consts.FieldDataJSONWO},
+				StateFunc:    NormalizeDataJSONFunc(name),
+				ValidateFunc: ValidateDataJSONFunc(name),
+				Sensitive:    true,
+				ExactlyOneOf: []string{consts.FieldDataJSON, consts.FieldDataJSONWO},
 			},
 			consts.FieldDataJSONWO: {
-				Type:          schema.TypeString,
-				Optional:      true,
-				Description:   "Write-only JSON-encoded secret data to write. This is required if data_json is not set. This property is write-only and will not be read from the API.",
-				WriteOnly:     true,
-				ConflictsWith: []string{consts.FieldDataJSON},
+				Type:         schema.TypeString,
+				Optional:     true,
+				Sensitive:    true,
+				WriteOnly:    true,
+				Description:  "Write-only JSON-encoded secret data to write. This is required if data_json is not set. This property is write-only and will not be read from the API.",
+				ExactlyOneOf: []string{consts.FieldDataJSON, consts.FieldDataJSONWO},
+				// The version is what tells a read that the data must not be
+				// stored in state, so it is mandatory here rather than merely
+				// being the trigger for updating the value.
+				RequiredWith: []string{consts.FieldDataJSONWOVersion},
 			},
 			consts.FieldDataJSONWOVersion: {
 				Type:         schema.TypeInt,
 				Optional:     true,
 				Description:  "The version of data_json_wo. For more info see updating write-only attributes.",
 				RequiredWith: []string{consts.FieldDataJSONWO},
+				ValidateFunc: validation.IntAtLeast(1),
 			},
 
 			"disable_read": {
@@ -95,20 +102,41 @@ func genericSecretResource(name string) *schema.Resource {
 // dataJSONFieldValue returns the JSON-encoded data supplied via either the
 // classic data_json field or the write-only data_json_wo field, shared by
 // vault_generic_secret and vault_generic_endpoint.
-func dataJSONFieldValue(d *schema.ResourceData) ([]byte, error) {
+//
+// The second return value reports whether Vault needs to be written at all.
+// A write-only value only reaches the provider while data_json_wo_version
+// changes, so an update triggered by an unrelated field such as disable_read
+// must leave the data already stored in Vault alone rather than failing or
+// writing an empty payload.
+func dataJSONFieldValue(d *schema.ResourceData) ([]byte, bool, error) {
 	if v, ok := d.GetOk(consts.FieldDataJSON); ok {
-		return []byte(v.(string)), nil
+		return []byte(v.(string)), true, nil
 	}
 
-	if d.IsNewResource() || d.HasChange(consts.FieldDataJSONWOVersion) {
-		p := cty.GetAttrPath(consts.FieldDataJSONWO)
-		woVal, _ := d.GetRawConfigAt(p)
-		if !woVal.IsNull() {
-			return []byte(woVal.AsString()), nil
-		}
+	if !d.IsNewResource() && !d.HasChange(consts.FieldDataJSONWOVersion) {
+		return nil, false, nil
 	}
 
-	return nil, fmt.Errorf("either %s or %s must be set", consts.FieldDataJSON, consts.FieldDataJSONWO)
+	woVal, _ := d.GetRawConfigAt(cty.GetAttrPath(consts.FieldDataJSONWO))
+	// A request that carries no configuration at all yields an unknown value
+	// rather than a null one, so both cases must be rejected before AsString.
+	if woVal.IsKnown() && !woVal.IsNull() {
+		return []byte(woVal.AsString()), true, nil
+	}
+
+	return nil, false, fmt.Errorf("either %s or %s must be set",
+		consts.FieldDataJSON, consts.FieldDataJSONWO)
+}
+
+// usesWriteOnlyData reports whether the data held in Vault was supplied
+// through the write-only data_json_wo field, in which case it must never be
+// read back into state.
+//
+// data_json_wo_version is an ordinary attribute, so unlike the write-only
+// value itself it is still readable during a read, where Terraform sends the
+// prior state but no configuration at all.
+func usesWriteOnlyData(d *schema.ResourceData) bool {
+	return d.Get(consts.FieldDataJSONWOVersion).(int) > 0
 }
 
 func ValidateDataJSONFunc(name string) func(c interface{}, k string) ([]string, []error) {
@@ -162,9 +190,12 @@ func genericSecretResourceWrite(d *schema.ResourceData, meta interface{}) error 
 	if e != nil {
 		return e
 	}
-	buf, err := dataJSONFieldValue(d)
+	buf, writeNeeded, err := dataJSONFieldValue(d)
 	if err != nil {
 		return err
+	}
+	if !writeNeeded {
+		return genericSecretResourceRead(d, meta)
 	}
 
 	var data map[string]interface{}
@@ -232,11 +263,7 @@ func genericSecretResourceRead(d *schema.ResourceData, meta interface{}) error {
 	if e != nil {
 		return e
 	}
-	// data_json_wo_version is a regular (non-write-only) attribute, so it is
-	// the only reliable signal in Read for whether this secret's data was
-	// last supplied via the write-only data_json_wo field, since the
-	// write-only value itself is never persisted to state.
-	usingWriteOnly := d.Get(consts.FieldDataJSONWOVersion).(int) > 0
+	usingWriteOnly := usesWriteOnlyData(d)
 
 	var data map[string]interface{}
 	shouldRead := !d.Get("disable_read").(bool)
@@ -270,13 +297,14 @@ func genericSecretResourceRead(d *schema.ResourceData, meta interface{}) error {
 		if err := d.Set(consts.FieldPath, path); err != nil {
 			return err
 		}
-	} else if usingWriteOnly {
-		log.Printf("[WARN] vault_generic_secret does not refresh when disable_read is set to true")
 	} else {
-		// Populate data from data_json from state
-		err := json.Unmarshal([]byte(d.Get(consts.FieldDataJSON).(string)), &data)
-		if err != nil {
-			return fmt.Errorf("data_json %#v syntax error: %s", d.Get(consts.FieldDataJSON), err)
+		// Populate data from data_json from state. Write-only data is not
+		// held in state, so there is nothing to reconstruct it from.
+		if !usingWriteOnly {
+			err := json.Unmarshal([]byte(d.Get(consts.FieldDataJSON).(string)), &data)
+			if err != nil {
+				return fmt.Errorf("data_json %#v syntax error: %s", d.Get(consts.FieldDataJSON), err)
+			}
 		}
 		log.Printf("[WARN] vault_generic_secret does not refresh when disable_read is set to true")
 	}
@@ -285,7 +313,14 @@ func genericSecretResourceRead(d *schema.ResourceData, meta interface{}) error {
 		return err
 	}
 
-	if !usingWriteOnly {
+	if usingWriteOnly {
+		// "data" is Computed, so a value written while the configuration
+		// still used data_json would otherwise survive in state forever
+		// once it switches to data_json_wo.
+		if err := d.Set("data", map[string]interface{}{}); err != nil {
+			return err
+		}
+	} else {
 		dataMap := serializeDataMapToString(data)
 		if err := d.Set("data", dataMap); err != nil {
 			return err

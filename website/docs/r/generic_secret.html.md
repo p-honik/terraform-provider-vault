@@ -62,9 +62,10 @@ EOT
 }
 ```
 
-~> **Note** Because Vault returns the same data that was written when this resource is read back (used for drift
-detection), the `data`/`data_json` attributes are not refreshed from Vault while `data_json_wo` is in use, in order
-to avoid re-introducing the secret value into state on every plan.
+~> **Note** Unlike most credentials, a secret written by this resource is returned again when Vault reads the path
+back, which is how drift detection normally works here. While `data_json_wo` is in use the `data_json` and `data`
+attributes are therefore not populated from Vault, so that the secret is not re-introduced into state on every
+refresh. Drift in the secret's value cannot be detected in this mode; drift detection for `data_json` is unchanged.
 
 ## Argument Reference
 
@@ -88,7 +89,8 @@ The following arguments are supported:
   written as the secret data at the given path. This is required if `data_json` is not set.
   **Note**: This property is write-only and will not be read from the API.
 
-* `data_json_wo_version` - (Optional) The version of `data_json_wo`. For more info see
+* `data_json_wo_version` - (Optional) The version of `data_json_wo`. Required when `data_json_wo` is set, and must
+  be at least `1`. Increment it to write a new value. For more info see
   [updating write-only attributes](../guides/using_write_only_attributes.html#updating-write-only-attributes).
 
 * `disable_read` - (Optional) true/false. Set this to true if your vault
@@ -131,3 +133,7 @@ Generic secrets can be imported using the `path`, e.g.
 ```
 $ terraform import vault_generic_secret.example secret/foo
 ```
+
+~> **Note** Import always reads the current value from Vault, so importing a secret whose configuration uses
+`data_json_wo` places that value in state until the next `terraform apply` reconciles
+`data_json_wo_version` and clears it.

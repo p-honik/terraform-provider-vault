@@ -103,7 +103,8 @@ The following arguments are supported:
   written to the given path as the secret data. This is required if `data_json` is not set.
   **Note**: This property is write-only and will not be read from the API.
 
-* `data_json_wo_version` - (Optional) The version of `data_json_wo`. For more info see
+* `data_json_wo_version` - (Optional) The version of `data_json_wo`. Required when `data_json_wo` is set, and must
+  be at least `1`. Increment it to write a new value. For more info see
   [updating write-only attributes](../guides/using_write_only_attributes.html#updating-write-only-attributes).
 
 * `disable_read` - (Optional) True/false. Set this to true if your vault
@@ -145,10 +146,13 @@ In addition to the fields above, the following attributes are exported:
   any non-string values returned from Vault are serialized as JSON.
   Only fields set in `write_fields` are present in the JSON data.
 
-~> **Note** While `data_json_wo` is in use, `data_json` is not refreshed from Vault on read (this also means
-`ignore_absent_fields` has no effect), in order to avoid re-introducing the written value into state on every plan.
-See the [write-only attributes guide](../guides/using_write_only_attributes.html) for more details, including how to
-update a write-only value.
+~> **Note** While `data_json_wo` is in use, `data_json` is not populated from Vault on read (this also means
+`ignore_absent_fields` has no effect), so that the written value is not re-introduced into state on every refresh.
+Because the payload is not available outside of a write, changing only `disable_read`, `disable_delete`,
+`ignore_absent_fields` or `write_fields` updates those settings without re-writing to Vault; increment
+`data_json_wo_version` when the payload itself must be written again. Note that `write_fields` still persists the
+selected fields of the *write response* to state, which is unaffected by `data_json_wo`. See the
+[write-only attributes guide](../guides/using_write_only_attributes.html) for more details.
 
 ## Required Vault Capabilities
 

@@ -9,6 +9,7 @@ import (
 	"log"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 
 	"github.com/hashicorp/terraform-provider-vault/internal/consts"
 	"github.com/hashicorp/terraform-provider-vault/internal/provider"
@@ -46,23 +47,29 @@ func genericEndpointResource(name string) *schema.Resource {
 				// necessary when disable_read is false for comparing values.
 				// NormalizeDataJSON and ValidateDataJSON are in
 				// resource_generic_secret.
-				StateFunc:     NormalizeDataJSONFunc(name),
-				ValidateFunc:  ValidateDataJSONFunc(name),
-				Sensitive:     true,
-				ConflictsWith: []string{consts.FieldDataJSONWO},
+				StateFunc:    NormalizeDataJSONFunc(name),
+				ValidateFunc: ValidateDataJSONFunc(name),
+				Sensitive:    true,
+				ExactlyOneOf: []string{consts.FieldDataJSON, consts.FieldDataJSONWO},
 			},
 			consts.FieldDataJSONWO: {
-				Type:          schema.TypeString,
-				Optional:      true,
-				Description:   "Write-only JSON-encoded data to write. This is required if data_json is not set. This property is write-only and will not be read from the API.",
-				WriteOnly:     true,
-				ConflictsWith: []string{consts.FieldDataJSON},
+				Type:         schema.TypeString,
+				Optional:     true,
+				Sensitive:    true,
+				WriteOnly:    true,
+				Description:  "Write-only JSON-encoded data to write. This is required if data_json is not set. This property is write-only and will not be read from the API.",
+				ExactlyOneOf: []string{consts.FieldDataJSON, consts.FieldDataJSONWO},
+				// The version is what tells a read that the data must not be
+				// stored in state, so it is mandatory here rather than merely
+				// being the trigger for updating the value.
+				RequiredWith: []string{consts.FieldDataJSONWOVersion},
 			},
 			consts.FieldDataJSONWOVersion: {
 				Type:         schema.TypeInt,
 				Optional:     true,
 				Description:  "The version of data_json_wo. For more info see updating write-only attributes.",
 				RequiredWith: []string{consts.FieldDataJSONWO},
+				ValidateFunc: validation.IntAtLeast(1),
 			},
 
 			"disable_read": {
@@ -112,9 +119,12 @@ func genericEndpointResourceWrite(d *schema.ResourceData, meta interface{}) erro
 		return e
 	}
 
-	buf, err := dataJSONFieldValue(d)
+	buf, writeNeeded, err := dataJSONFieldValue(d)
 	if err != nil {
 		return err
+	}
+	if !writeNeeded {
+		return genericEndpointResourceRead(d, meta)
 	}
 
 	var data map[string]interface{}
@@ -195,11 +205,7 @@ func genericEndpointResourceDelete(d *schema.ResourceData, meta interface{}) err
 }
 
 func genericEndpointResourceRead(d *schema.ResourceData, meta interface{}) error {
-	// data_json_wo_version is a regular (non-write-only) attribute, so it is
-	// the only reliable signal in Read for whether this endpoint's data was
-	// last supplied via the write-only data_json_wo field, since the
-	// write-only value itself is never persisted to state.
-	usingWriteOnly := d.Get(consts.FieldDataJSONWOVersion).(int) > 0
+	usingWriteOnly := usesWriteOnlyData(d)
 
 	shouldRead := !d.Get("disable_read").(bool)
 

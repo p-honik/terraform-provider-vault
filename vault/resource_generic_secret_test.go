@@ -462,7 +462,8 @@ func TestAccGenericSecret_data_json_wo(t *testing.T) {
 					}),
 					resource.TestCheckResourceAttr(resourceName, consts.FieldDataJSONWOVersion, "1"),
 					resource.TestCheckNoResourceAttr(resourceName, consts.FieldDataJSON),
-					resource.TestCheckNoResourceAttr(resourceName, "data.%"),
+					// the secret must not be mirrored into the computed map
+					resource.TestCheckResourceAttr(resourceName, "data.%", "0"),
 				),
 			},
 			{
