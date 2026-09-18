@@ -92,6 +92,25 @@ func genericSecretResource(name string) *schema.Resource {
 	}
 }
 
+// dataJSONFieldValue returns the JSON-encoded data supplied via either the
+// classic data_json field or the write-only data_json_wo field, shared by
+// vault_generic_secret and vault_generic_endpoint.
+func dataJSONFieldValue(d *schema.ResourceData) ([]byte, error) {
+	if v, ok := d.GetOk(consts.FieldDataJSON); ok {
+		return []byte(v.(string)), nil
+	}
+
+	if d.IsNewResource() || d.HasChange(consts.FieldDataJSONWOVersion) {
+		p := cty.GetAttrPath(consts.FieldDataJSONWO)
+		woVal, _ := d.GetRawConfigAt(p)
+		if !woVal.IsNull() {
+			return []byte(woVal.AsString()), nil
+		}
+	}
+
+	return nil, fmt.Errorf("either %s or %s must be set", consts.FieldDataJSON, consts.FieldDataJSONWO)
+}
+
 func ValidateDataJSONFunc(name string) func(c interface{}, k string) ([]string, []error) {
 	return func(c interface{}, k string) ([]string, []error) {
 		return validateDataJSON(name, c.(string), k)
@@ -143,13 +162,9 @@ func genericSecretResourceWrite(d *schema.ResourceData, meta interface{}) error 
 	if e != nil {
 		return e
 	}
-	var buf []byte
-	if v, ok := d.GetOk(consts.FieldDataJSON); ok {
-		buf = []byte(v.(string))
-	} else if d.IsNewResource() || d.HasChange(consts.FieldDataJSONWOVersion) {
-		p := cty.GetAttrPath(consts.FieldDataJSONWO)
-		woVal, _ := d.GetRawConfigAt(p)
-		buf = []byte(woVal.AsString())
+	buf, err := dataJSONFieldValue(d)
+	if err != nil {
+		return err
 	}
 
 	var data map[string]interface{}

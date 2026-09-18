@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/hashicorp/go-cty/cty"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 
 	"github.com/hashicorp/terraform-provider-vault/internal/consts"
@@ -113,13 +112,9 @@ func genericEndpointResourceWrite(d *schema.ResourceData, meta interface{}) erro
 		return e
 	}
 
-	var buf []byte
-	if v, ok := d.GetOk(consts.FieldDataJSON); ok {
-		buf = []byte(v.(string))
-	} else if d.IsNewResource() || d.HasChange(consts.FieldDataJSONWOVersion) {
-		p := cty.GetAttrPath(consts.FieldDataJSONWO)
-		woVal, _ := d.GetRawConfigAt(p)
-		buf = []byte(woVal.AsString())
+	buf, err := dataJSONFieldValue(d)
+	if err != nil {
+		return err
 	}
 
 	var data map[string]interface{}
