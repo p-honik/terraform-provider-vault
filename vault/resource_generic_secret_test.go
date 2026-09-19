@@ -490,6 +490,43 @@ func TestAccGenericSecret_data_json_wo(t *testing.T) {
 	})
 }
 
+// TestAccGenericSecret_writeOnlyMigration covers a configuration moving from
+// data_json to data_json_wo: the secret previously held in state must be gone
+// once the switch is applied, including the copy in the computed data map.
+func TestAccGenericSecret_writeOnlyMigration(t *testing.T) {
+	t.Parallel()
+
+	resourceName := "vault_generic_secret.test"
+	mount := acctest.RandomWithPrefix("secretsv1")
+	name := acctest.RandomWithPrefix("test")
+	path := fmt.Sprintf("%s/%s", mount, name)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV5ProviderFactories: testAccProtoV5ProviderFactories(context.Background(), t),
+		PreCheck:                 func() { testutil.TestAccPreCheck(t) },
+		Steps: []resource.TestStep{
+			{
+				Config: testResourceGenericSecret_initialConfig(mount, name),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttrSet(resourceName, consts.FieldDataJSON),
+					resource.TestCheckResourceAttr(resourceName, "data.zip", "zap"),
+				),
+			},
+			{
+				Config: testResourceGenericSecret_data_json_wo(mount, name, "zoop", 1),
+				Check: resource.ComposeTestCheckFunc(
+					assertGenericSecretDataEquals(path, map[string]interface{}{
+						"zip": "zoop",
+					}),
+					resource.TestCheckResourceAttr(resourceName, consts.FieldDataJSONWOVersion, "1"),
+					resource.TestCheckNoResourceAttr(resourceName, consts.FieldDataJSON),
+					resource.TestCheckResourceAttr(resourceName, "data.%", "0"),
+				),
+			},
+		},
+	})
+}
+
 func testResourceGenericSecret_data_json_wo(mount, name, value string, version int) string {
 	return fmt.Sprintf(`
 resource "vault_mount" "v1" {
