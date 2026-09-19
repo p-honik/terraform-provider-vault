@@ -4,6 +4,7 @@
 package vault
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
@@ -17,7 +18,7 @@ import (
 func TestDataJSONFieldValue(t *testing.T) {
 	res := genericSecretResource("vault_generic_secret")
 
-	t.Run("data_json is returned verbatim", func(t *testing.T) {
+	t.Run("data_json is decoded", func(t *testing.T) {
 		d := res.Data(&terraform.InstanceState{
 			ID: "secret/foo",
 			Attributes: map[string]string{
@@ -27,15 +28,36 @@ func TestDataJSONFieldValue(t *testing.T) {
 			},
 		})
 
-		buf, writeNeeded, err := dataJSONFieldValue(d)
+		data, writeNeeded, err := dataJSONFieldValue(d)
 		if err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
 		if !writeNeeded {
 			t.Fatal("expected a write to be required for data_json")
 		}
-		if string(buf) != `{"zip":"zap"}` {
-			t.Fatalf("unexpected payload %q", buf)
+		if data["zip"] != "zap" {
+			t.Fatalf("unexpected payload %#v", data)
+		}
+	})
+
+	// Terraform prints resource errors to the console, so a malformed
+	// payload must not be echoed back: it holds the secret.
+	t.Run("a syntax error does not echo the value", func(t *testing.T) {
+		d := res.Data(&terraform.InstanceState{
+			ID: "secret/foo",
+			Attributes: map[string]string{
+				"id":        "secret/foo",
+				"path":      "secret/foo",
+				"data_json": `{"zip":"s3cr3t`,
+			},
+		})
+
+		_, _, err := dataJSONFieldValue(d)
+		if err == nil {
+			t.Fatal("expected a syntax error")
+		}
+		if strings.Contains(err.Error(), "s3cr3t") {
+			t.Fatalf("error leaks the payload: %s", err)
 		}
 	})
 

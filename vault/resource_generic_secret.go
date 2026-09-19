@@ -61,6 +61,7 @@ func genericSecretResource(name string) *schema.Resource {
 				Sensitive:    true,
 				WriteOnly:    true,
 				Description:  "Write-only JSON-encoded secret data to write. This is required if data_json is not set. This property is write-only and will not be read from the API.",
+				ValidateFunc: ValidateDataJSONFunc(name),
 				ExactlyOneOf: []string{consts.FieldDataJSON, consts.FieldDataJSONWO},
 				// The version is what tells a read that the data must not be
 				// stored in state, so it is mandatory here rather than merely
@@ -99,8 +100,8 @@ func genericSecretResource(name string) *schema.Resource {
 	}
 }
 
-// dataJSONFieldValue returns the JSON-encoded data supplied via either the
-// classic data_json field or the write-only data_json_wo field, shared by
+// dataJSONFieldValue returns the data supplied via either the classic
+// data_json field or the write-only data_json_wo field, shared by
 // vault_generic_secret and vault_generic_endpoint.
 //
 // The second return value reports whether Vault needs to be written at all.
@@ -108,24 +109,38 @@ func genericSecretResource(name string) *schema.Resource {
 // changes, so an update triggered by an unrelated field such as disable_read
 // must leave the data already stored in Vault alone rather than failing or
 // writing an empty payload.
-func dataJSONFieldValue(d *schema.ResourceData) ([]byte, bool, error) {
+func dataJSONFieldValue(d *schema.ResourceData) (map[string]interface{}, bool, error) {
+	field := consts.FieldDataJSON
+
+	var raw string
 	if v, ok := d.GetOk(consts.FieldDataJSON); ok {
-		return []byte(v.(string)), true, nil
+		raw = v.(string)
+	} else {
+		if !d.IsNewResource() && !d.HasChange(consts.FieldDataJSONWOVersion) {
+			return nil, false, nil
+		}
+
+		woVal, _ := d.GetRawConfigAt(cty.GetAttrPath(consts.FieldDataJSONWO))
+		// A request that carries no configuration at all yields an unknown
+		// value rather than a null one, so both cases must be rejected
+		// before AsString.
+		if !woVal.IsKnown() || woVal.IsNull() {
+			return nil, false, fmt.Errorf("either %s or %s must be set",
+				consts.FieldDataJSON, consts.FieldDataJSONWO)
+		}
+
+		field = consts.FieldDataJSONWO
+		raw = woVal.AsString()
 	}
 
-	if !d.IsNewResource() && !d.HasChange(consts.FieldDataJSONWOVersion) {
-		return nil, false, nil
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		// The offending value is deliberately left out of the error: it
+		// holds the secret, and Terraform prints errors to the console.
+		return nil, false, fmt.Errorf("%s syntax error: %s", field, err)
 	}
 
-	woVal, _ := d.GetRawConfigAt(cty.GetAttrPath(consts.FieldDataJSONWO))
-	// A request that carries no configuration at all yields an unknown value
-	// rather than a null one, so both cases must be rejected before AsString.
-	if woVal.IsKnown() && !woVal.IsNull() {
-		return []byte(woVal.AsString()), true, nil
-	}
-
-	return nil, false, fmt.Errorf("either %s or %s must be set",
-		consts.FieldDataJSON, consts.FieldDataJSONWO)
+	return data, true, nil
 }
 
 // usesWriteOnlyData reports whether the data held in Vault was supplied
@@ -190,17 +205,12 @@ func genericSecretResourceWrite(d *schema.ResourceData, meta interface{}) error 
 	if e != nil {
 		return e
 	}
-	buf, writeNeeded, err := dataJSONFieldValue(d)
+	data, writeNeeded, err := dataJSONFieldValue(d)
 	if err != nil {
 		return err
 	}
 	if !writeNeeded {
 		return genericSecretResourceRead(d, meta)
-	}
-
-	var data map[string]interface{}
-	if err := json.Unmarshal(buf, &data); err != nil {
-		return fmt.Errorf("data_json %#v syntax error: %s", string(buf), err)
 	}
 
 	path := d.Get(consts.FieldPath).(string)

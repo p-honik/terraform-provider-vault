@@ -58,6 +58,7 @@ func genericEndpointResource(name string) *schema.Resource {
 				Sensitive:    true,
 				WriteOnly:    true,
 				Description:  "Write-only JSON-encoded data to write. This is required if data_json is not set. This property is write-only and will not be read from the API.",
+				ValidateFunc: ValidateDataJSONFunc(name),
 				ExactlyOneOf: []string{consts.FieldDataJSON, consts.FieldDataJSONWO},
 				// The version is what tells a read that the data must not be
 				// stored in state, so it is mandatory here rather than merely
@@ -119,17 +120,12 @@ func genericEndpointResourceWrite(d *schema.ResourceData, meta interface{}) erro
 		return e
 	}
 
-	buf, writeNeeded, err := dataJSONFieldValue(d)
+	data, writeNeeded, err := dataJSONFieldValue(d)
 	if err != nil {
 		return err
 	}
 	if !writeNeeded {
 		return genericEndpointResourceRead(d, meta)
-	}
-
-	var data map[string]interface{}
-	if err := json.Unmarshal(buf, &data); err != nil {
-		return fmt.Errorf("data_json %#v syntax error: %s", string(buf), err)
 	}
 
 	path := d.Get("path").(string)
